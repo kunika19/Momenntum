@@ -13,7 +13,8 @@ import streamlit as st
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.abspath(os.path.join(current_dir, os.pardir))
 # 環境に応じてCSVのパスを調整してください
-CSV_FILE = os.path.join(parent_dir, "Topix500", "tickers_filtered.csv") 
+CSV_FILE = os.path.join(current_dir, "tickers_filtered.csv")
+#CSV_FILE = os.path.join(parent_dir, "Topix500", "tickers_filtered.csv") 
 
 RISK_FACTOR = 0.005  
 CASH_ADJUST = 0.96  
