@@ -125,7 +125,7 @@ st.sidebar.header("🔧 設定・資金入力")
 
 # 資金入力 (カンマ区切り対応のテキスト入力、または数値入力)
 capital_input = st.sidebar.number_input(
-    "担保評価合計額 (円)", 
+    "資金 (円)", 
     min_value=0, 
     value=10000000, 
     step=100000
