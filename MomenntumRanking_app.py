@@ -127,8 +127,8 @@ st.sidebar.header("🔧 設定・資金入力")
 capital_input = st.sidebar.number_input(
     "資金 (円)", 
     min_value=0, 
-    value=10000000, 
-    step=100000
+    value=10,000,000, 
+    step=100,000
 )
 
 # 銘柄CSVファイルのアップローダー（ローカルパスに見つからない場合のバックアップ）
