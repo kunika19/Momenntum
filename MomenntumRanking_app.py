@@ -119,7 +119,7 @@ st.title("📈 モメンタム運用判断")
 st.write("Topix500などの銘柄群から、クレノー流モメンタムスコアを計算し売買アクションを判定します。")
 
 st.sidebar.header("🔧 設定・資金入力")
-capital_input = st.sidebar.number_input("担保評価合計額 (円)", min_value=0, value=10000000, step=100000)
+capital_input = st.sidebar.number_input("投資可能合計額 (円)", min_value=0, value=10000000, step=100000, format="%d")
 
 st.sidebar.subheader("銘柄データの読み込み")
 uploaded_file = st.sidebar.file_uploader("CSVファイルをアップロード", type=["csv"])
