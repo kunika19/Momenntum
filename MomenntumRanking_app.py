@@ -75,7 +75,7 @@ def run_ranking_process(ticker_df, current_golnas_value):
             # --- 株数計算（6捨7入ロジック） ---
             shares_raw = int(risk_budget_per_stock / atr)
             rem = shares_raw % 100
-            order_shares_rounded = (shares_raw // 100) * 100 + (100 if rem >= 70 else 0)
+            shares_rounded = (shares_raw // 100) * 100 + (100 if rem >= 70 else 0)
             
             results.append({
                 "Rank": 0,
@@ -85,9 +85,9 @@ def run_ranking_process(ticker_df, current_golnas_value):
                 "AvgTurnover_Oku": round(avg_turnover / 10**8, 2),
                 "MaxGap%": round(max_gap, 2),
                 "Price": round(current_price, 1),
-                "Order_Shares": shares_raw,
-                "Order_Shares_Rounded": order_shares_rounded,
-                "Position_Size": int(current_price * order_shares_rounded),
+                "Shares": shares_raw,
+                "Shares_Rounded": shares_rounded,
+                "Position_Size": int(current_price * shares_rounded),
                 "MA100_OK": current_price > ma100 if not np.isnan(ma100) else True,
                 "Liquidity_OK": avg_turnover >= MIN_DAILY_TURNOVER
             })
@@ -159,8 +159,8 @@ if st.sidebar.button("🚀 ランキングを生成する") and ticker_df is not
                 'MaxGap%': '{:.2f}%',
                 'AvgTurnover_Oku': '{:.2f} 億円',
                 'Price': '{:,.1f} 円',
-                'Order_Shares': '{:,}',
-                'Order_Shares_Rounded': '{:,}',
+                'Shares': '{:,}',
+                'Shares_Rounded': '{:,}',
                 'Position_Size': '{:,} 円'
             }),
             use_container_width=True
