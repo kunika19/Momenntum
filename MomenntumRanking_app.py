@@ -148,8 +148,8 @@ if st.sidebar.button("🚀 ランキングを生成する") and ticker_df is not
         else: st.warning("地合い判定: 慎重")
             
         display_cols = [
-            "Rank", "Ticker", "Name", "Score", "Action", "Order_Shares_Rounded",
-             "Price","MaxGap%", "AvgTurnover_Oku",  "Order_Shares", "Position_Size"
+            "Rank", "Ticker", "Name", "Action", "Shares_Rounded", "Score",
+             "Price","MaxGap%", "AvgTurnover_Oku",  "Shares", "Position_Size"
         ]
         output_df = rank_df[display_cols]
         
