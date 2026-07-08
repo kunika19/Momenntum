@@ -334,6 +334,8 @@ def decide_portfolio_action(row):
     # 新規買い候補
     if action == "★BUY":
         if not held:
+            if target <= 0:
+                return pd.Series(["—", 0, 0])
             return pd.Series(["🆕 新規購入", target, target * price])
         diff = target - current
         if target <= 0:
