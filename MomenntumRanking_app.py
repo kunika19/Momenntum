@@ -336,9 +336,11 @@ def decide_portfolio_action(row):
         if not held:
             return pd.Series(["🆕 新規購入", target, target * price])
         diff = target - current
-        if target > 0 and current < target * 0.9:
+        if target <= 0:
+            return pd.Series(["🟡 一部売却(調整)", -current, -current * price])
+        if current < target * 0.9:
             return pd.Series(["🔵 買い増し", diff, diff * price])
-        if target > 0 and current > target * 1.1:
+        if current > target * 1.1:
             return pd.Series(["🟡 一部売却(調整)", diff, diff * price])
         return pd.Series(["✅ 保有継続", 0, 0])
 
@@ -352,9 +354,11 @@ def decide_portfolio_action(row):
     if action == "HOLD":
         if held:
             diff = target - current
-            if target > 0 and current < target * 0.9:
+            if target <= 0:
+                return pd.Series(["🟡 一部売却(調整)", -current, -current * price])
+            if current < target * 0.9:
                 return pd.Series(["🔵 買い増し", diff, diff * price])
-            if target > 0 and current > target * 1.1:
+            if current > target * 1.1:
                 return pd.Series(["🟡 一部売却(調整)", diff, diff * price])
             return pd.Series(["✅ 保有継続", 0, 0])
         return pd.Series(["—", 0, 0])
