@@ -15,12 +15,12 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 # 環境に応じてCSVのパスを調整してください
 CSV_FILE = os.path.join(current_dir, "tickers_topix500.csv")
 
-RISK_FACTOR = 0.005  
+RISK_FACTOR = 0.002  
 CASH_ADJUST = 0.96  
 MIN_DAILY_TURNOVER = 1 * 10**8  
 MAX_GAP_THRESHOLD = 15.0  
-MOMENTUM_WINDOW = 60      
-VOLATILITY_WINDOW = 20    
+MOMENTUM_WINDOW = 90      
+ATR_WINDOW = 14           # 真のATR(14)（旧: VOLATILITY_WINDOW=20 の20日レンジ/2）
 
 # ==============================================================================
 # 2. ロジック関数
@@ -47,6 +47,8 @@ def run_ranking_process(ticker_df, current_golnas_value):
     raw_data = yf.download(tickers + ["^N225"], period="1y", progress=False)
     market_data = raw_data['Close']
     volume_data = raw_data['Volume']
+    high_data = raw_data['High']
+    low_data = raw_data['Low']
     
     virtual_capital = current_golnas_value * CASH_ADJUST
     risk_budget_per_stock = virtual_capital * RISK_FACTOR
@@ -68,9 +70,14 @@ def run_ranking_process(ticker_df, current_golnas_value):
             ma100 = prices.rolling(100).mean().iloc[-1]
             max_gap = prices.tail(MOMENTUM_WINDOW).pct_change().abs().max() * 100
             
-            vol_range = prices.tail(VOLATILITY_WINDOW)
-            atr = (vol_range.max() - vol_range.min()) / 2
-            if atr <= 0: atr = 0.01
+            # --- 真のATR(14): TR = max(高値-安値, |高値-前日終値|, |安値-前日終値|) ---
+            h = high_data[ticker]
+            l = low_data[ticker]
+            c = market_data[ticker]
+            pc = c.shift(1)
+            tr = pd.concat([h - l, (h - pc).abs(), (l - pc).abs()], axis=1).max(axis=1)
+            atr = tr.dropna().rolling(ATR_WINDOW).mean().iloc[-1]
+            if np.isnan(atr) or atr <= 0: atr = 0.01
             
             current_price = float(prices.iloc[-1])
             
