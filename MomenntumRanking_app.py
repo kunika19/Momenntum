@@ -15,8 +15,16 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 # 環境に応じてCSVのパスを調整してください
 CSV_FILE = os.path.join(current_dir, "tickers_topix500.csv")
 
-RISK_FACTOR = 0.002  
-CASH_ADJUST = 0.96  
+RISK_FACTOR = 0.003       # 1銘柄あたりリスク0.3%（バックテスト検証済み）
+
+# --- 追証耐性から建代金上限を逆算するための既定値 ---
+DEFAULT_HAIRCUT = 80          # 代用掛目(%)。投資信託は通常80%
+MAINTENANCE_LINE = 20         # SBI証券の最低委託保証金率(維持率)=20%。これを割ると追証
+DEFAULT_STRESS_DROP = 20      # 想定担保下落率(%)
+DEFAULT_ASSUMED_DD = 36       # 戦略の想定最大DD(%)。RISK 0.003 のバックテスト実測 -35.9%
+DEFAULT_TARGET_RATIO = 30     # ストレス時に確保したい維持率(%)
+DEFAULT_MARGIN_RATE = 2.8     # 信用金利(年率%)。SBIは手数料無料で金利のみ発生
+DEFAULT_HOLDING_MONTHS = 12   # 想定保有期間(ヶ月)。この間の金利が実質保証金を削る
 MIN_DAILY_TURNOVER = 1 * 10**8  
 MAX_GAP_THRESHOLD = 15.0  
 MOMENTUM_WINDOW = 90      
@@ -40,7 +48,63 @@ def calculate_momentum(prices):
     except:
         return -999
 
-def run_ranking_process(ticker_df, current_golnas_value):
+def calc_trading_limit(collateral_value, cash_value, haircut_pct,
+                       stress_drop_pct, assumed_dd_pct, target_ratio_pct,
+                       margin_rate_pct=DEFAULT_MARGIN_RATE,
+                       holding_months=DEFAULT_HOLDING_MONTHS,
+                       accrued_cost=0.0):
+    """
+    追証に耐えられる建代金上限を逆算する。
+
+    ストレス時（担保がstress_drop%下落し、戦略が想定最大DDを引き、
+    さらに保有期間分の金利が累積した状態）でも目標維持率を確保できる建代金Bを求める。
+
+        実質保証金A = 代用評価額(=担保時価×掛目) + 現金 − 既発生の諸経費
+        将来の諸経費 = B × 金利(年率) × 保有月数/12
+        ストレス時A' = 代用評価額×(1−担保下落率) + 現金 − 既発生諸経費
+                       − B×想定DD − B×金利負担
+        A' / B ≧ 目標維持率
+
+        ⇒ B ≦ (代用評価額×(1−担保下落率) + 現金 − 既発生諸経費)
+               ÷ (目標維持率 + 想定DD + 金利負担)
+
+    金利はBに比例して増えるため、分母に加算する形で厳密に解ける。
+    （例: 年2.8%を12ヶ月保有 = 目標維持率を2.8%pt引き上げるのと等価）
+
+    ※現金は掛目がかからず100%評価。下落もしないためストレス時もそのまま残る。
+    ※現物購入分には金利がかからないため、この見積もりは安全側。
+    """
+    haircut = haircut_pct / 100.0
+    stress_drop = stress_drop_pct / 100.0
+    assumed_dd = assumed_dd_pct / 100.0
+    target_ratio = target_ratio_pct / 100.0
+    interest_burden = (margin_rate_pct / 100.0) * (holding_months / 12.0)
+
+    collateral_evaluated = collateral_value * haircut   # 代用有価証券評価額（掛目後）
+    # 実質保証金A: SBIの定義に合わせ、既に発生している諸経費を差し引く
+    real_margin = collateral_evaluated + cash_value - accrued_cost
+
+    stressed_margin = collateral_evaluated * (1 - stress_drop) + cash_value - accrued_cost
+    denominator = target_ratio + assumed_dd + interest_burden
+    limit = stressed_margin / denominator if denominator > 0 else 0
+    limit = max(limit, 0)
+
+    return {
+        "collateral_evaluated": collateral_evaluated,
+        "real_margin": real_margin,
+        "stressed_margin": stressed_margin,
+        "accrued_cost": accrued_cost,
+        "limit": limit,
+        "interest_burden": interest_burden,          # 建代金に対する金利負担率
+        "interest_cost": limit * interest_burden,    # 保有期間中に発生する金利額
+        # 参考: 限度額いっぱいに建てた場合の平常時レバレッジ・維持率
+        "leverage": (limit / real_margin) if real_margin > 0 else 0,
+        "current_ratio": (real_margin / limit * 100) if limit > 0 else 0,
+    }
+
+
+def run_ranking_process(ticker_df, trading_limit):
+    """trading_limit: 建代金上限（UI側で追証耐性から逆算済み）"""
     tickers = ticker_df['Ticker'].tolist()
     name_map = dict(zip(ticker_df['Ticker'], ticker_df['Name']))
 
@@ -49,8 +113,8 @@ def run_ranking_process(ticker_df, current_golnas_value):
     volume_data = raw_data['Volume']
     high_data = raw_data['High']
     low_data = raw_data['Low']
-    
-    virtual_capital = current_golnas_value * CASH_ADJUST
+
+    virtual_capital = trading_limit
     risk_budget_per_stock = virtual_capital * RISK_FACTOR
     
     n225_series = market_data["^N225"].dropna()
@@ -212,6 +276,91 @@ def _rerun_app():
         st.rerun()
     except AttributeError:
         st.experimental_rerun()
+
+
+def extract_margin_cost_stats(text):
+    """SBI「信用建玉一覧」CSVから建代金・諸経費等・保有日数を集計し、
+    実際に発生しているコストから実効金利（年率）を逆算する。
+    諸経費等には金利のほか信用管理費・名義書換料が含まれるため、
+    表面金利（2.8%）より高くなるのが通常。対応できない形式ならNoneを返す。"""
+    if not text:
+        return None
+    lines = text.splitlines()
+    header_idx = None
+    for i, line in enumerate(lines):
+        if "銘柄コード" in line:
+            header_idx = i
+            break
+    if header_idx is None:
+        return None
+
+    data_lines = []
+    for line in lines[header_idx + 1:]:
+        if line.strip() == "":
+            break
+        data_lines.append(line)
+    if not data_lines:
+        return None
+
+    try:
+        df = pd.read_csv(io.StringIO("\n".join([lines[header_idx]] + data_lines)))
+    except Exception:
+        return None
+    df.columns = [str(c).strip() for c in df.columns]
+
+    if "建代金" not in df.columns or "諸経費等" not in df.columns:
+        return None
+
+    if "売/買建" in df.columns:
+        df = df[~df["売/買建"].astype(str).str.contains("売", na=False)]
+
+    def to_num(col):
+        return pd.to_numeric(
+            df[col].astype(str).str.replace(",", "", regex=False).str.replace("+", "", regex=False),
+            errors="coerce",
+        )
+
+    df["_daikin"] = to_num("建代金").fillna(0)
+    df["_keihi"] = to_num("諸経費等").fillna(0)
+    df = df[df["_daikin"] > 0]
+    if df.empty:
+        return None
+
+    total_daikin = float(df["_daikin"].sum())
+    total_keihi = float(df["_keihi"].sum())
+
+    # 建日から保有日数を求め、建代金加重の平均日数と実効金利を逆算する。
+    # 基準日はCSVの断面日。取得日が不明なため「最も新しい建日」を採用する
+    # （週次リバランス運用では直近に必ず建玉があるため妥当な近似）。
+    # 数日のズレでも保有日数が短い建玉では逆算金利が大きく振れるため、この判定は重要。
+    avg_days = None
+    implied_rate = None
+    ref_date = None
+    if "建日" in df.columns:
+        tatehi = pd.to_datetime(df["建日"].astype(str).str.strip(),
+                                format="%Y/%m/%d", errors="coerce")
+        if tatehi.notna().any():
+            today = pd.Timestamp(datetime.now().date())
+            ref_date = min(tatehi.max(), today)   # 未来日付は今日で打ち切り
+            days = (ref_date - tatehi).dt.days
+            valid = days.notna() & (days >= 0)
+            if valid.any():
+                w = df.loc[valid, "_daikin"]
+                avg_days = float((days[valid] * w).sum() / w.sum())
+                # 実効金利 = 諸経費 ÷ (建代金 × 保有日数/365)
+                denom = float((df.loc[valid, "_daikin"] * days[valid] / 365).sum())
+                if denom > 0:
+                    implied_rate = float(df.loc[valid, "_keihi"].sum() / denom * 100)
+
+    return {
+        "total_daikin": total_daikin,
+        "total_keihi": total_keihi,
+        "cost_pct": total_keihi / total_daikin * 100 if total_daikin > 0 else 0,
+        "avg_days": avg_days,
+        "implied_rate": implied_rate,
+        "ref_date": ref_date,
+        "positions": int(len(df)),
+    }
 
 
 def try_parse_sbi_margin_csv(text):
@@ -405,19 +554,74 @@ st.set_page_config(page_title="モメンタム運用判断システム", layout=
 st.title("📈 モメンタム運用判断")
 st.write("Topix500などの銘柄群から、クレノー流モメンタムスコアを計算し売買アクションを判定します。")
 
-st.sidebar.header("🔧 設定・資金入力")
-capital_input = st.sidebar.number_input("投資可能額 (円)", min_value=0, value=10000000, step=100000)
 
-st.sidebar.subheader("📱 表示モード")
-view_mode = st.sidebar.radio(
-    "画面の見やすさを選択",
-    ["スマホ向け（カード表示）", "PC向け（表表示）"],
-    index=0,
-    help="iPhoneなど小さい画面ではカード表示が見やすく、PCの大画面では表表示が一覧しやすいです。",
-)
-is_mobile = view_mode.startswith("スマホ")
+def render_capital_summary(info, limit_after_buffer, stress_drop, assumed_dd, target_ratio,
+                           margin_rate, holding_months, stats=None):
+    """建代金上限とリスク予算のサマリーを表示"""
+    st.subheader("💰 建代金上限（追証耐性からの逆算）")
 
-st.sidebar.subheader("銘柄データの読み込み")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("実質保証金", f"{info['real_margin']:,.0f} 円",
+              help="代用評価額（担保時価×掛目）＋現金")
+    c2.metric("建代金上限", f"{limit_after_buffer:,.0f} 円",
+              help=f"ストレス時（担保-{stress_drop}%＋戦略DD-{assumed_dd}%＋金利{holding_months}ヶ月分）でも維持率{target_ratio}%を確保できる上限。")
+    c3.metric("1銘柄リスク予算", f"{limit_after_buffer * RISK_FACTOR:,.0f} 円",
+              help=f"建代金上限 × RISK_FACTOR({RISK_FACTOR})。これをATRで割って株数を決めます。")
+
+    if info["real_margin"] > 0:
+        lev = limit_after_buffer / info["real_margin"]
+        st.caption(
+            f"実質保証金に対するレバレッジ **{lev:.2f}倍** ／ "
+            f"平常時の維持率 **{(info['real_margin'] / limit_after_buffer * 100) if limit_after_buffer > 0 else 0:.0f}%**"
+        )
+
+    st.caption(
+        f"金利 年{margin_rate}% × {holding_months}ヶ月 ＝ 建代金の **{info['interest_burden'] * 100:.1f}%**"
+        f"（約 {info['interest_cost']:,.0f} 円）を織り込み済み。"
+        f"実効的に目標維持率を {target_ratio}% → {target_ratio + info['interest_burden'] * 100:.1f}% に引き上げるのと等価です。"
+    )
+
+    if target_ratio <= MAINTENANCE_LINE:
+        st.warning(
+            f"目標維持率が追証ライン（{MAINTENANCE_LINE}%）ちょうどです。"
+            "この設定は「追証は出ないが実質破綻」の水準なので、30%以上を推奨します。"
+        )
+
+    # --- 建玉CSVがあれば、現在の建代金と上限を突き合わせて過不足を表示 ---
+    if stats:
+        cur = stats["total_daikin"]
+        diff = limit_after_buffer - cur
+        st.markdown("**現在の建玉との比較**")
+        d1, d2, d3 = st.columns(3)
+        d1.metric("現在の建代金", f"{cur:,.0f} 円",
+                  help=f"買建 {stats['positions']}建玉の合計")
+        d2.metric("累積諸経費", f"{stats['total_keihi']:,.0f} 円",
+                  help=f"建代金比 {stats['cost_pct']:.3f}%。実質保証金から差し引き済み。")
+        if diff >= 0:
+            d3.metric("上限までの余裕", f"{diff:,.0f} 円", delta="範囲内")
+        else:
+            d3.metric("超過額", f"{abs(diff):,.0f} 円", delta="要減玉", delta_color="inverse")
+            st.error(
+                f"現在の建代金が上限を **{abs(diff):,.0f}円** 超過しています。"
+                f"想定ストレス（担保-{stress_drop}%＋戦略DD-{assumed_dd}%）が起きると"
+                f"維持率{target_ratio}%を割り込みます。"
+            )
+        if stats.get("avg_days") is not None:
+            _ref = stats.get("ref_date")
+            _ref_txt = f"（基準日 {_ref.strftime('%Y/%m/%d')}）" if _ref is not None else ""
+            _rate_txt = (f" ／ 諸経費から逆算した実効金利 {stats['implied_rate']:.2f}%"
+                         if stats.get("implied_rate") else "")
+            st.caption(
+                f"建代金加重の平均保有日数 {stats['avg_days']:.1f}日{_ref_txt}{_rate_txt}"
+            )
+
+    st.caption(
+        "※現物で買った分は追証の対象外かつ金利もかからないため、この上限は安全側の見積もりです。"
+        "暴落時は掛目自体が引き下げられる場合があります。"
+    )
+
+
+st.sidebar.subheader("📋 銘柄データ（ユニバース）")
 uploaded_file = st.sidebar.file_uploader("CSVファイルをアップロード", type=["csv"])
 
 ticker_df = None
@@ -440,6 +644,86 @@ portfolio_file = st.sidebar.file_uploader(
 )
 st.sidebar.caption("CSVが無くても、本文の入力欄に貼り付け／手入力できます。")
 
+# アップロードされた建玉CSVを先にデコードし、実際の諸経費・実効金利を抽出する
+portfolio_raw_text = None
+if portfolio_file is not None:
+    _raw_bytes = portfolio_file.getvalue()
+    for _enc in ["utf-8-sig", "cp932", "shift_jis"]:
+        try:
+            portfolio_raw_text = _raw_bytes.decode(_enc)
+            break
+        except Exception:
+            continue
+margin_stats = extract_margin_cost_stats(portfolio_raw_text) if portfolio_raw_text else None
+
+st.sidebar.subheader("💰 資金入力")
+
+collateral_input = st.sidebar.number_input(
+    "担保評価額（投信等の時価・円）", min_value=0, value=0, step=100000,
+    help="代用有価証券に入れている投資信託などの時価。掛目は「追証耐性の前提」で調整します。",
+)
+
+with st.sidebar.expander("⚠️ 追証耐性の前提", expanded=False):
+    haircut_input = st.slider(
+        "代用掛目 (%)", min_value=50, max_value=100, value=DEFAULT_HAIRCUT, step=5,
+        help="投資信託は通常80%。増担保規制やレバレッジ型ETF等の適用で引き下げられることがあります。",
+    )
+    stress_drop_input = st.slider(
+        "想定担保下落率 (%)", 0, 60, DEFAULT_STRESS_DROP, step=5,
+        help="暴落時に担保がどこまで下がるか。NASDAQ100ゴールドプラス等の2倍レバ商品なら30〜35%も想定範囲。",
+    )
+    assumed_dd_input = st.slider(
+        "戦略の想定最大DD (%)", 10, 60, DEFAULT_ASSUMED_DD, step=1,
+        help=f"RISK {RISK_FACTOR} のバックテスト実測は約-36%（2018-19）。",
+    )
+    target_ratio_input = st.slider(
+        "ストレス時の目標維持率 (%)", MAINTENANCE_LINE, 50, DEFAULT_TARGET_RATIO, step=5,
+        help=f"{MAINTENANCE_LINE}%が追証ライン。ちょうどに設定すると『追証は出ないが実質破綻』の水準です。",
+    )
+    _rate_default = DEFAULT_MARGIN_RATE
+    if margin_stats and margin_stats.get("implied_rate"):
+        _rate_default = round(margin_stats["implied_rate"], 2)
+        st.caption(
+            f"建玉CSVの諸経費から実効金利 **{_rate_default}%** を逆算し、既定値に設定しました。"
+        )
+    margin_rate_input = st.number_input(
+        "信用金利 (年率%)", min_value=0.0, max_value=10.0,
+        value=float(_rate_default), step=0.1,
+        help="諸経費等には金利のほか信用管理費(110円/銘柄/月)や名義書換料が含まれるため、表面金利より高くなります。",
+    )
+    holding_months_input = st.slider(
+        "想定保有期間 (ヶ月)", 1, 24, DEFAULT_HOLDING_MONTHS, step=1,
+        help="この期間に累積する金利を織り込みます。年2.8%×12ヶ月＝目標維持率を2.8%pt上げるのと等価。",
+    )
+
+cash_input = st.sidebar.number_input(
+    "現金 (円) ※100%評価", min_value=0, value=0, step=100000,
+    help="現金は掛目がかからず100%評価。現物購入にも充当できます。",
+)
+
+limit_info = calc_trading_limit(
+    float(collateral_input), float(cash_input), haircut_input,
+    stress_drop_input, assumed_dd_input, target_ratio_input,
+    margin_rate_input, holding_months_input,
+    accrued_cost=(margin_stats["total_keihi"] if margin_stats else 0.0),
+)
+trading_limit = limit_info["limit"]   # 建代金上限（安全余裕は目標維持率で明示的に確保）
+capital_input = trading_limit         # ポジションサイズ計算のベース資金
+
+render_capital_summary(limit_info, trading_limit, stress_drop_input,
+                       assumed_dd_input, target_ratio_input,
+                       margin_rate_input, holding_months_input,
+                       stats=margin_stats)
+
+st.sidebar.subheader("📱 表示モード")
+view_mode = st.sidebar.radio(
+    "画面の見やすさを選択",
+    ["スマホ向け（カード表示）", "PC向け（表表示）"],
+    index=0,
+    help="iPhoneなど小さい画面ではカード表示が見やすく、PCの大画面では表表示が一覧しやすいです。",
+)
+is_mobile = view_mode.startswith("スマホ")
+
 with st.expander("💼 現在のポートフォリオ（保有銘柄・株数）", expanded=True):
     st.caption("ここに現在保有している銘柄と株数を入力してください。CSVアップロード／コピー&ペースト／直接入力のいずれでも構いません。ランキング生成後、ここに入力した内容と比較して取るべきアクションを表示します。")
 
@@ -447,14 +731,7 @@ with st.expander("💼 現在のポートフォリオ（保有銘柄・株数）
     if portfolio_file is not None:
         file_sig = f"{portfolio_file.name}_{portfolio_file.size}"
         if st.session_state.get("portfolio_csv_sig") != file_sig:
-            raw_bytes = portfolio_file.getvalue()
-            decoded_text = None
-            for enc in ["utf-8-sig", "cp932", "shift_jis"]:
-                try:
-                    decoded_text = raw_bytes.decode(enc)
-                    break
-                except Exception:
-                    continue
+            decoded_text = portfolio_raw_text  # サイドバーでデコード済みのものを再利用
 
             extracted_csv = None
             parse_note = None
@@ -529,6 +806,7 @@ with st.expander("💼 現在のポートフォリオ（保有銘柄・株数）
     st.session_state["portfolio_data"] = edited_df.reset_index(drop=True)
     portfolio_df = edited_df
 
+st.sidebar.subheader("🚀 実行")
 if st.sidebar.button("🚀 ランキングを生成する") and ticker_df is not None:
     with st.spinner("データ取得・計算中..."):
         rank_df, market_ok = run_ranking_process(ticker_df, float(capital_input))
