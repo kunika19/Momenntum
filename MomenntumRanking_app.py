@@ -430,41 +430,46 @@ ACTION_COLORS = {
 
 
 def render_action_cards(df):
-    """アクション一覧をスマホで見やすい縦並びのカードHTMLとして描画する"""
-    for _, row in df.iterrows():
-        action = row["PortfolioAction"]
+    """アクション一覧を種別ごとにグループ化し、box-shadow付きのカードHTMLとして描画する（スマホ向け）。
+    引数dfは呼び出し側で既にaction_order順にソート済みであることを前提とする。"""
+    for action in df["PortfolioAction"].unique():
+        group = df[df["PortfolioAction"] == action]
         color = ACTION_COLORS.get(action, "#7f8c8d")
-        trade_shares = int(row["TradeShares"])
-        trade_amount = int(row["TradeAmount"])
+        st.markdown(f"##### {action}（{len(group)}銘柄）")
 
-        if trade_shares > 0:
-            trade_line = f"<b>+{trade_shares:,}株</b> 購入（約 {trade_amount:,}円）"
-        elif trade_shares < 0:
-            trade_line = f"<b>{trade_shares:,}株</b> 売却（約 {abs(trade_amount):,}円）"
-        else:
-            trade_line = "売買なし（株数の変更なし）"
+        for _, row in group.iterrows():
+            trade_shares = int(row["TradeShares"])
+            trade_amount = int(row["TradeAmount"])
 
-        current = int(row["CurrentShares"])
-        target = int(row["Shares_Rounded"])
-        price = row["Price"]
+            if trade_shares > 0:
+                trade_line = f"<b>+{trade_shares:,}株</b> 購入（約 {trade_amount:,}円）"
+            elif trade_shares < 0:
+                trade_line = f"<b>{trade_shares:,}株</b> 売却（約 {abs(trade_amount):,}円）"
+            else:
+                trade_line = "売買なし（株数の変更なし）"
 
-        card_html = f"""
-        <div style="border-left:6px solid {color};background:rgba(127,127,127,0.10);
-                    border-radius:8px;padding:12px 14px;margin-bottom:10px;">
-          <div style="font-size:1.15rem;font-weight:700;color:{color};margin-bottom:4px;">
-            {action}
-          </div>
-          <div style="font-size:1.05rem;font-weight:600;margin-bottom:6px;">
-            {row['Ticker']}　{row['Name']}
-            <span style="font-size:0.8rem;color:#888;font-weight:400;">（{int(row['Rank'])}位）</span>
-          </div>
-          <div style="font-size:1.0rem;margin-bottom:6px;">{trade_line}</div>
-          <div style="font-size:0.85rem;color:#888;">
-            現在 {current:,}株 → 目標 {target:,}株 ／ 株価 {price:,.1f}円
-          </div>
-        </div>
-        """
-        st.markdown(card_html, unsafe_allow_html=True)
+            current = int(row["CurrentShares"])
+            target = int(row["Shares_Rounded"])
+            price = row["Price"]
+
+            card_html = f"""
+            <div style="border-left:6px solid {color};background:rgba(127,127,127,0.10);
+                        border-radius:10px;padding:12px 14px;margin-bottom:10px;
+                        box-shadow:0 1px 3px rgba(0,0,0,0.15);">
+              <div style="font-size:1.15rem;font-weight:700;color:{color};margin-bottom:4px;">
+                {action}
+              </div>
+              <div style="font-size:1.05rem;font-weight:600;margin-bottom:6px;">
+                {row['Ticker']}　{row['Name']}
+                <span style="font-size:0.8rem;color:#888;font-weight:400;">（{int(row['Rank'])}位）</span>
+              </div>
+              <div style="font-size:1.0rem;margin-bottom:6px;">{trade_line}</div>
+              <div style="font-size:0.85rem;color:#888;">
+                現在 {current:,}株 → 目標 {target:,}株 ／ 株価 {price:,.1f}円
+              </div>
+            </div>
+            """
+            st.markdown(card_html, unsafe_allow_html=True)
 
 
 def decide_portfolio_action(row):
@@ -549,10 +554,37 @@ def compare_with_portfolio(rank_df, portfolio_df):
 # ==============================================================================
 # 3. Streamlit WEB UI インターフェース
 # ==============================================================================
-st.set_page_config(page_title="モメンタム運用判断システム", layout="wide")
+st.set_page_config(
+    page_title="モメンタム運用判断",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# --- グローバルCSS（余白調整・st.metricのカード化）を1箇所にまとめて注入 ---
+# 色はライト/ダーク両対応のため rgba(127,127,127,...) 系のみを使用し、白/黒の直接指定は避ける。
+st.markdown(
+    """
+    <style>
+    /* 上部の余白を少し圧縮してコンテンツを詰める */
+    .block-container {
+        padding-top: 2.2rem;
+        padding-bottom: 2rem;
+    }
+    /* st.metric をカード風に（枠線＋角丸＋薄い背景） */
+    div[data-testid="stMetric"] {
+        background: rgba(127, 127, 127, 0.08);
+        border: 1px solid rgba(127, 127, 127, 0.18);
+        border-radius: 10px;
+        padding: 12px 14px 8px 14px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 st.title("📈 モメンタム運用判断")
-st.write("Topix500などの銘柄群から、クレノー流モメンタムスコアを計算し売買アクションを判定します。")
+st.caption("Topix500などの銘柄群から、クレノー流モメンタムスコアを計算し売買アクションを判定します。")
 
 
 def render_capital_summary(info, limit_after_buffer, stress_drop, assumed_dd, target_ratio,
@@ -621,7 +653,10 @@ def render_capital_summary(info, limit_after_buffer, stress_drop, assumed_dd, ta
     )
 
 
-st.sidebar.subheader("📋 銘柄データ（ユニバース）")
+# ------------------------------------------------------------------------
+# ① 銘柄ユニバース
+# ------------------------------------------------------------------------
+st.sidebar.subheader("① 銘柄ユニバース")
 uploaded_file = st.sidebar.file_uploader("CSVファイルをアップロード", type=["csv"])
 
 ticker_df = None
@@ -638,7 +673,10 @@ elif os.path.exists(CSV_FILE):
         ticker_df = pd.read_csv(CSV_FILE, encoding='shift-jis')
     st.sidebar.info(f"ローカルファイルを使用中: {os.path.basename(CSV_FILE)}")
 
-st.sidebar.subheader("💼 現在のポートフォリオ")
+# ------------------------------------------------------------------------
+# ② 現在のポートフォリオ（任意）
+# ------------------------------------------------------------------------
+st.sidebar.subheader("② 現在のポートフォリオ（任意）")
 portfolio_file = st.sidebar.file_uploader(
     "保有銘柄CSV（Ticker, Shares列）", type=["csv"], key="portfolio_csv_uploader"
 )
@@ -656,7 +694,10 @@ if portfolio_file is not None:
             continue
 margin_stats = extract_margin_cost_stats(portfolio_raw_text) if portfolio_raw_text else None
 
-st.sidebar.subheader("💰 資金入力")
+# ------------------------------------------------------------------------
+# ③ 資金入力
+# ------------------------------------------------------------------------
+st.sidebar.subheader("③ 資金入力")
 
 collateral_input = st.sidebar.number_input(
     "担保評価額（投信等の時価・円）", min_value=0, value=0, step=100000,
@@ -710,11 +751,9 @@ limit_info = calc_trading_limit(
 trading_limit = limit_info["limit"]   # 建代金上限（安全余裕は目標維持率で明示的に確保）
 capital_input = trading_limit         # ポジションサイズ計算のベース資金
 
-render_capital_summary(limit_info, trading_limit, stress_drop_input,
-                       assumed_dd_input, target_ratio_input,
-                       margin_rate_input, holding_months_input,
-                       stats=margin_stats)
-
+# ------------------------------------------------------------------------
+# 表示モード（スマホ/PC）
+# ------------------------------------------------------------------------
 st.sidebar.subheader("📱 表示モード")
 view_mode = st.sidebar.radio(
     "画面の見やすさを選択",
@@ -724,7 +763,56 @@ view_mode = st.sidebar.radio(
 )
 is_mobile = view_mode.startswith("スマホ")
 
-with st.expander("💼 現在のポートフォリオ（保有銘柄・株数）", expanded=True):
+# ------------------------------------------------------------------------
+# ④ 実行
+# ------------------------------------------------------------------------
+st.sidebar.subheader("④ 実行")
+run_disabled = ticker_df is None
+run_clicked = st.sidebar.button(
+    "🚀 ランキングを生成する",
+    type="primary",
+    width="stretch",
+    disabled=run_disabled,
+)
+if run_disabled:
+    st.sidebar.caption("銘柄CSVを読み込むと実行できます。")
+
+if run_clicked and ticker_df is not None:
+    with st.status("データ取得・計算中...", expanded=True) as status:
+        st.write("株価データの取得とモメンタムスコアの計算を実行中...（銘柄数により1〜2分かかります）")
+        rank_df, market_ok = run_ranking_process(ticker_df, float(capital_input))
+        status.update(label="完了", state="complete", expanded=False)
+    # 結果をsession_stateへ永続化。生成後に他のウィジェットを操作しても結果が消えないようにする。
+    st.session_state["rank_result"] = {
+        "df": rank_df,
+        "market_ok": market_ok,
+        "generated_at": datetime.now(),
+        "trading_limit": float(capital_input),
+    }
+    st.toast("ランキングを生成しました")
+
+# session_stateを読み直す（本ラン内でボタンが押されていれば直前の結果を即座に反映する）
+rank_result = st.session_state.get("rank_result")
+has_result = rank_result is not None and not rank_result["df"].empty
+
+# ------------------------------------------------------------------------
+# メイン画面: 結果が無い場合はガイダンス＋資金サマリー、ある場合は下部でタブ表示
+# ------------------------------------------------------------------------
+if not has_result:
+    if ticker_df is None:
+        st.info(
+            "**使い方**\n\n"
+            "① サイドバーから銘柄CSV（Ticker, Name列）をアップロード\n\n"
+            "② 資金を入力\n\n"
+            "③ ランキングを生成"
+        )
+    # 結果生成前は従来どおりメイン画面に資金サマリーを表示する（結果生成後はタブ内のみに表示）
+    render_capital_summary(limit_info, trading_limit, stress_drop_input,
+                           assumed_dd_input, target_ratio_input,
+                           margin_rate_input, holding_months_input,
+                           stats=margin_stats)
+
+with st.expander("💼 現在のポートフォリオ（保有銘柄・株数）", expanded=not has_result):
     st.caption("ここに現在保有している銘柄と株数を入力してください。CSVアップロード／コピー&ペースト／直接入力のいずれでも構いません。ランキング生成後、ここに入力した内容と比較して取るべきアクションを表示します。")
 
     # --- ① CSVアップロード（SBI証券「信用建玉一覧」形式、または列名自動認識の通常形式に対応） ---
@@ -794,7 +882,7 @@ with st.expander("💼 現在のポートフォリオ（保有銘柄・株数）
     edited_df = st.data_editor(
         base_df,
         num_rows="dynamic",
-        use_container_width=True,
+        width="stretch",
         key=editor_key,
         column_config={
             "Ticker": st.column_config.TextColumn("Ticker"),
@@ -806,142 +894,242 @@ with st.expander("💼 現在のポートフォリオ（保有銘柄・株数）
     st.session_state["portfolio_data"] = edited_df.reset_index(drop=True)
     portfolio_df = edited_df
 
-st.sidebar.subheader("🚀 実行")
-if st.sidebar.button("🚀 ランキングを生成する") and ticker_df is not None:
-    with st.spinner("データ取得・計算中..."):
-        rank_df, market_ok = run_ranking_process(ticker_df, float(capital_input))
-        
-    if not rank_df.empty:
-        st.subheader(f"📊 運用判断レポート ({datetime.now().strftime('%Y-%m-%d')})")
-        if market_ok: st.success("地合い判定: 良好")
-        else: st.warning("地合い判定: 慎重")
-            
-        display_cols = [
-            "Rank", "Ticker", "Name", "Action", "Shares_Rounded", "Score",
-             "Price","MaxGap%", "AvgTurnover_Oku",  "Shares", "Position_Size"
-        ]
-        output_df = rank_df[display_cols]
-        
-        if is_mobile:
-            # スマホでは横スクロールを避けるため要点列のみ表示
-            mobile_cols = ["Rank", "Ticker", "Name", "Action", "Score", "Price"]
-            st.dataframe(
-                output_df[mobile_cols].style.format({
-                    'Score': '{:.2f}',
-                    'Price': '{:,.1f} 円',
-                }),
-                use_container_width=True,
-                hide_index=True,
-            )
-            with st.expander("詳細列も表示する"):
-                st.dataframe(
-                    output_df.style.format({
-                        'Score': '{:.2f}',
-                        'MaxGap%': '{:.2f}%',
-                        'AvgTurnover_Oku': '{:.2f} 億円',
-                        'Price': '{:,.1f} 円',
-                        'Shares': '{:,}',
-                        'Shares_Rounded': '{:,}',
-                        'Position_Size': '{:,} 円'
-                    }),
-                    use_container_width=True,
-                    hide_index=True,
+# ------------------------------------------------------------------------
+# 結果表示（session_stateにあれば常に描画する。他ウィジェット操作で結果が消えない）
+# ------------------------------------------------------------------------
+if rank_result is not None:
+    if abs(rank_result["trading_limit"] - float(capital_input)) > 1e-6:
+        st.warning("資金設定が変更されています。最新の設定で再生成してください。")
+    st.caption(f"生成日時: {rank_result['generated_at'].strftime('%Y-%m-%d %H:%M:%S')}")
+
+    rank_df = rank_result["df"]
+    market_ok = rank_result["market_ok"]
+
+    if rank_df.empty:
+        st.warning("条件に合致する銘柄がありませんでした。")
+    else:
+        tab_rank, tab_action, tab_capital = st.tabs(
+            ["📊 ランキング", "🔄 売買アクション", "💰 資金サマリー"]
+        )
+
+        # ====================================================================
+        # タブ1: ランキング
+        # ====================================================================
+        with tab_rank:
+            total_n = len(rank_df)
+            n_buy_total = int((rank_df["Action"] == "★BUY").sum())
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("対象銘柄数", f"{total_n} 銘柄")
+            m2.metric("★BUY銘柄数", f"{n_buy_total} 銘柄")
+            m3.metric("地合い", "良好" if market_ok else "慎重")
+
+            if not market_ok:
+                st.warning("地合い判定: 慎重 — 新規買いは見送り推奨（WAIT判定）")
+
+            # --- フィルタUI（表示のみに作用。CSVダウンロードは全件のまま） ---
+            f1, f2, f3 = st.columns([2, 2, 1])
+            with f1:
+                action_group_filter = st.pills(
+                    "Actionで絞り込み",
+                    options=["★BUY", "HOLD", "SELL系", "その他"],
+                    selection_mode="multi",
+                    default=["★BUY", "HOLD", "SELL系", "その他"],
+                    key="rank_action_filter",
                 )
-        else:
-            st.dataframe(
-                output_df.style.format({
-                    'Score': '{:.2f}',
-                    'MaxGap%': '{:.2f}%',
-                    'AvgTurnover_Oku': '{:.2f} 億円',
-                    'Price': '{:,.1f} 円',
-                    'Shares': '{:,}',
-                    'Shares_Rounded': '{:,}',
-                    'Position_Size': '{:,} 円'
-                }),
-                use_container_width=True
-            )
-        
-        csv_data = output_df.to_csv(index=False, encoding='utf-8-sig')
-        st.download_button("📥 結果をCSVとしてダウンロード", data=csv_data, file_name="ranking_result.csv", mime="text/csv")
+            with f2:
+                search_text = st.text_input(
+                    "Ticker / Name で検索", key="rank_search_text", placeholder="例）7203 やトヨタ"
+                )
+            with f3:
+                show_n_option = st.selectbox(
+                    "表示件数",
+                    [20, 50, 100, "全件"],
+                    index=1,
+                    key="rank_show_n",
+                    format_func=lambda x: f"{x}件" if isinstance(x, int) else x,
+                )
 
-        # --------------------------------------------------------------------
-        # ポートフォリオ比較 - 取るべきアクション
-        # --------------------------------------------------------------------
-        st.markdown("---")
-        st.subheader("🔄 現在のポートフォリオと比較 - 取るべきアクション")
+            # Action文字列を「★BUY/HOLD/SELL系/その他」の4分類にまとめる（表示フィルタ専用の分類、判定ロジックには影響しない）
+            def _action_group(a):
+                if a == "★BUY":
+                    return "★BUY"
+                if a == "HOLD":
+                    return "HOLD"
+                if a.startswith("SELL"):
+                    return "SELL系"
+                return "その他"
 
-        valid_portfolio = portfolio_df.dropna(subset=["Ticker"]).copy()
-        valid_portfolio = valid_portfolio[valid_portfolio["Ticker"].astype(str).str.strip() != ""]
-
-        if valid_portfolio.empty:
-            st.info("上の「現在のポートフォリオ」に保有銘柄と株数を入力すると、ランキングと比較して具体的な売買アクション（新規購入・売却・買い増し等）が表示されます。")
-        else:
-            compared_df, missing_df = compare_with_portfolio(rank_df, valid_portfolio)
-
-            action_order = [
-                "🔴 全株売却", "⚠️ 流動性低下・売却検討", "🆕 新規購入",
-                "🔵 買い増し", "🟡 一部売却(調整)", "❓ 確認要",
-                "✅ 保有継続", "⏸ 保有継続(地合い待ち)",
+            display_cols = [
+                "Rank", "Ticker", "Name", "Action", "Shares_Rounded", "Score",
+                 "Price","MaxGap%", "AvgTurnover_Oku",  "Shares", "Position_Size"
             ]
-            actionable_df = compared_df[compared_df["PortfolioAction"] != "—"].copy()
-            actionable_df["__order"] = actionable_df["PortfolioAction"].apply(
-                lambda x: action_order.index(x) if x in action_order else len(action_order)
-            )
-            actionable_df = actionable_df.sort_values(["__order", "Rank"]).drop(columns="__order")
+            output_df = rank_df[display_cols]
 
-            n_buy = (actionable_df["PortfolioAction"] == "🆕 新規購入").sum()
-            n_sell = actionable_df["PortfolioAction"].isin(["🔴 全株売却", "⚠️ 流動性低下・売却検討"]).sum()
-            n_add = (actionable_df["PortfolioAction"] == "🔵 買い増し").sum()
-            n_trim = (actionable_df["PortfolioAction"] == "🟡 一部売却(調整)").sum()
+            filtered_df = output_df.copy()
+            if action_group_filter:
+                filtered_df = filtered_df[filtered_df["Action"].apply(_action_group).isin(action_group_filter)]
+            if search_text and search_text.strip():
+                _q = search_text.strip().lower()
+                _mask = (
+                    filtered_df["Ticker"].astype(str).str.lower().str.contains(_q, na=False)
+                    | filtered_df["Name"].astype(str).str.lower().str.contains(_q, na=False)
+                )
+                filtered_df = filtered_df[_mask]
+            if show_n_option != "全件":
+                filtered_df = filtered_df.head(int(show_n_option))
+
+            # Action列に応じて行に薄い背景色を付ける（★BUY=緑系、SELL系=赤系、WAIT/SKIP=黄系。rgbaでダークモード対応）
+            def _row_bg(row):
+                a = row["Action"]
+                if a == "★BUY":
+                    c = "rgba(46, 204, 113, 0.18)"
+                elif a.startswith("SELL"):
+                    c = "rgba(231, 76, 60, 0.18)"
+                elif a.startswith("WAIT") or a.startswith("SKIP"):
+                    c = "rgba(241, 196, 15, 0.18)"
+                else:
+                    c = ""
+                return [f"background-color: {c}" if c else "" for _ in row]
+
+            format_dict_full = {
+                'Score': '{:.2f}',
+                'MaxGap%': '{:.2f}%',
+                'AvgTurnover_Oku': '{:.2f} 億円',
+                'Price': '{:,.1f} 円',
+                'Shares': '{:,}',
+                'Shares_Rounded': '{:,}',
+                'Position_Size': '{:,} 円'
+            }
 
             if is_mobile:
-                r1c1, r1c2 = st.columns(2)
-                r1c1.metric("🆕 新規購入", f"{n_buy} 銘柄")
-                r1c2.metric("🔴 売却", f"{n_sell} 銘柄")
-                r2c1, r2c2 = st.columns(2)
-                r2c1.metric("🔵 買い増し", f"{n_add} 銘柄")
-                r2c2.metric("🟡 調整売却", f"{n_trim} 銘柄")
-            else:
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("🆕 新規購入", f"{n_buy} 銘柄")
-                c2.metric("🔴 売却", f"{n_sell} 銘柄")
-                c3.metric("🔵 買い増し", f"{n_add} 銘柄")
-                c4.metric("🟡 調整売却", f"{n_trim} 銘柄")
-
-            if actionable_df.empty:
-                st.success("現在のポートフォリオに対して、新たに取るべきアクションはありません（全銘柄が保有継続）。")
-            else:
-                compare_cols = [
-                    "Ticker", "Name", "Rank", "Action", "PortfolioAction",
-                    "CurrentShares", "Shares_Rounded", "TradeShares", "TradeAmount", "Price",
-                ]
-                compare_display = actionable_df[compare_cols].rename(
-                    columns={"Shares_Rounded": "TargetShares"}
+                # スマホでは横スクロールを避けるため要点列のみ表示
+                mobile_cols = ["Rank", "Ticker", "Name", "Action", "Score", "Price"]
+                st.dataframe(
+                    filtered_df[mobile_cols].style.apply(_row_bg, axis=1).format({
+                        'Score': '{:.2f}',
+                        'Price': '{:,.1f} 円',
+                    }),
+                    width="stretch",
+                    hide_index=True,
                 )
+                with st.expander("詳細列も表示する"):
+                    st.dataframe(
+                        filtered_df.style.apply(_row_bg, axis=1).format(format_dict_full),
+                        width="stretch",
+                        hide_index=True,
+                    )
+            else:
+                st.dataframe(
+                    filtered_df.style.apply(_row_bg, axis=1).format(format_dict_full),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+            st.caption(f"フィルタ後 {len(filtered_df)} 件 / 全 {len(output_df)} 件を表示中（CSVダウンロードは全件です）")
+
+            csv_data = output_df.to_csv(index=False, encoding='utf-8-sig')
+            st.download_button(
+                "📥 結果をCSVとしてダウンロード",
+                data=csv_data,
+                file_name=f"ranking_result_{rank_result['generated_at'].strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+            )
+
+        # ====================================================================
+        # タブ2: 売買アクション
+        # ====================================================================
+        with tab_action:
+            valid_portfolio = portfolio_df.dropna(subset=["Ticker"]).copy()
+            valid_portfolio = valid_portfolio[valid_portfolio["Ticker"].astype(str).str.strip() != ""]
+
+            if valid_portfolio.empty:
+                st.info("上の「現在のポートフォリオ」に保有銘柄と株数を入力すると、ランキングと比較して具体的な売買アクション（新規購入・売却・買い増し等）が表示されます。")
+            else:
+                compared_df, missing_df = compare_with_portfolio(rank_df, valid_portfolio)
+
+                action_order = [
+                    "🔴 全株売却", "⚠️ 流動性低下・売却検討", "🆕 新規購入",
+                    "🔵 買い増し", "🟡 一部売却(調整)", "❓ 確認要",
+                    "✅ 保有継続", "⏸ 保有継続(地合い待ち)",
+                ]
+                actionable_df = compared_df[compared_df["PortfolioAction"] != "—"].copy()
+                actionable_df["__order"] = actionable_df["PortfolioAction"].apply(
+                    lambda x: action_order.index(x) if x in action_order else len(action_order)
+                )
+                actionable_df = actionable_df.sort_values(["__order", "Rank"]).drop(columns="__order")
+
+                n_buy = (actionable_df["PortfolioAction"] == "🆕 新規購入").sum()
+                n_sell = actionable_df["PortfolioAction"].isin(["🔴 全株売却", "⚠️ 流動性低下・売却検討"]).sum()
+                n_add = (actionable_df["PortfolioAction"] == "🔵 買い増し").sum()
+                n_trim = (actionable_df["PortfolioAction"] == "🟡 一部売却(調整)").sum()
 
                 if is_mobile:
-                    render_action_cards(actionable_df)
+                    r1c1, r1c2 = st.columns(2)
+                    r1c1.metric("🆕 新規購入", f"{n_buy} 銘柄")
+                    r1c2.metric("🔴 売却", f"{n_sell} 銘柄")
+                    r2c1, r2c2 = st.columns(2)
+                    r2c1.metric("🔵 買い増し", f"{n_add} 銘柄")
+                    r2c2.metric("🟡 調整売却", f"{n_trim} 銘柄")
                 else:
-                    st.dataframe(
-                        compare_display.style.format({
-                            "Price": "{:,.1f} 円",
-                            "CurrentShares": "{:,}",
-                            "TargetShares": "{:,}",
-                            "TradeShares": "{:+,}",
-                            "TradeAmount": "{:+,.0f} 円",
-                        }),
-                        use_container_width=True
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("🆕 新規購入", f"{n_buy} 銘柄")
+                    c2.metric("🔴 売却", f"{n_sell} 銘柄")
+                    c3.metric("🔵 買い増し", f"{n_add} 銘柄")
+                    c4.metric("🟡 調整売却", f"{n_trim} 銘柄")
+
+                # --- 金額サマリー（表示用の集計のみ。TradeAmountの正/負の合計で、売買判断そのものは変えない） ---
+                buy_total = actionable_df.loc[actionable_df["TradeAmount"] > 0, "TradeAmount"].sum()
+                sell_total = -actionable_df.loc[actionable_df["TradeAmount"] < 0, "TradeAmount"].sum()
+                net_total = buy_total - sell_total
+                a1, a2, a3 = st.columns(3)
+                a1.metric("購入合計", f"{buy_total:,.0f} 円")
+                a2.metric("売却合計", f"{sell_total:,.0f} 円")
+                a3.metric("差引", f"{net_total:,.0f} 円")
+
+                if actionable_df.empty:
+                    st.success("現在のポートフォリオに対して、新たに取るべきアクションはありません（全銘柄が保有継続）。")
+                else:
+                    compare_cols = [
+                        "Ticker", "Name", "Rank", "Action", "PortfolioAction",
+                        "CurrentShares", "Shares_Rounded", "TradeShares", "TradeAmount", "Price",
+                    ]
+                    compare_display = actionable_df[compare_cols].rename(
+                        columns={"Shares_Rounded": "TargetShares"}
                     )
 
-                compare_csv = compare_display.to_csv(index=False, encoding="utf-8-sig")
-                st.download_button(
-                    "📥 アクションリストをCSVでダウンロード",
-                    data=compare_csv,
-                    file_name="portfolio_actions.csv",
-                    mime="text/csv",
-                    key="portfolio_action_download",
-                )
+                    if is_mobile:
+                        render_action_cards(actionable_df)
+                    else:
+                        st.dataframe(
+                            compare_display.style.format({
+                                "Price": "{:,.1f} 円",
+                                "CurrentShares": "{:,}",
+                                "TargetShares": "{:,}",
+                                "TradeShares": "{:+,}",
+                                "TradeAmount": "{:+,.0f} 円",
+                            }),
+                            width="stretch"
+                        )
 
-            if not missing_df.empty:
-                st.warning("以下の保有銘柄はランキング対象外（データ取得不可・対象ユニバース外）のため個別にご確認ください。")
-                st.dataframe(missing_df, use_container_width=True)
+                    compare_csv = compare_display.to_csv(index=False, encoding="utf-8-sig")
+                    st.download_button(
+                        "📥 アクションリストをCSVでダウンロード",
+                        data=compare_csv,
+                        file_name=f"portfolio_actions_{rank_result['generated_at'].strftime('%Y%m%d')}.csv",
+                        mime="text/csv",
+                        key="portfolio_action_download",
+                    )
+
+                if not missing_df.empty:
+                    st.warning("以下の保有銘柄はランキング対象外（データ取得不可・対象ユニバース外）のため個別にご確認ください。")
+                    st.dataframe(missing_df, width="stretch")
+
+        # ====================================================================
+        # タブ3: 資金サマリー
+        # ====================================================================
+        with tab_capital:
+            render_capital_summary(limit_info, trading_limit, stress_drop_input,
+                                   assumed_dd_input, target_ratio_input,
+                                   margin_rate_input, holding_months_input,
+                                   stats=margin_stats)
