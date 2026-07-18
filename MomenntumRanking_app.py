@@ -28,7 +28,7 @@ DEFAULT_HOLDING_MONTHS = 12   # 想定保有期間(ヶ月)。この間の金利�
 MIN_DAILY_TURNOVER = 1 * 10**8  
 MAX_GAP_THRESHOLD = 15.0  
 MOMENTUM_WINDOW = 90      
-ATR_WINDOW = 14           # 真のATR(14)（旧: VOLATILITY_WINDOW=20 の20日レンジ/2）
+ATR_WINDOW = 14           # 真のATR(14)
 
 # ==============================================================================
 # 2. ロジック関数
@@ -269,13 +269,6 @@ def parse_pasted_portfolio(text):
         parsed.columns = [f"col{i}" for i in range(parsed.shape[1])]
 
     return extract_ticker_shares(parsed)
-
-
-def _rerun_app():
-    try:
-        st.rerun()
-    except AttributeError:
-        st.experimental_rerun()
 
 
 def extract_margin_cost_stats(text):
@@ -587,7 +580,17 @@ st.title("📈 モメンタム運用判断")
 st.caption("Topix500などの銘柄群から、クレノー流モメンタムスコアを計算し売買アクションを判定します。")
 
 
-def render_capital_summary(info, limit_after_buffer, stress_drop, assumed_dd, target_ratio,
+def read_csv_fallback_encoding(src):
+    """utf-8-sig で読めなければ shift-jis で読み直す（証券会社CSV対策）"""
+    try:
+        return pd.read_csv(src, encoding="utf-8-sig")
+    except Exception:
+        if hasattr(src, "seek"):
+            src.seek(0)
+        return pd.read_csv(src, encoding="shift-jis")
+
+
+def render_capital_summary(info, stress_drop, assumed_dd, target_ratio,
                            margin_rate, holding_months, stats=None):
     """建代金上限とリスク予算のサマリーを表示"""
     st.subheader("💰 建代金上限（追証耐性からの逆算）")
@@ -595,16 +598,15 @@ def render_capital_summary(info, limit_after_buffer, stress_drop, assumed_dd, ta
     c1, c2, c3 = st.columns(3)
     c1.metric("実質保証金", f"{info['real_margin']:,.0f} 円",
               help="代用評価額（担保時価×掛目）＋現金")
-    c2.metric("建代金上限", f"{limit_after_buffer:,.0f} 円",
+    c2.metric("建代金上限", f"{info['limit']:,.0f} 円",
               help=f"ストレス時（担保-{stress_drop}%＋戦略DD-{assumed_dd}%＋金利{holding_months}ヶ月分）でも維持率{target_ratio}%を確保できる上限。")
-    c3.metric("1銘柄リスク予算", f"{limit_after_buffer * RISK_FACTOR:,.0f} 円",
+    c3.metric("1銘柄リスク予算", f"{info['limit'] * RISK_FACTOR:,.0f} 円",
               help=f"建代金上限 × RISK_FACTOR({RISK_FACTOR})。これをATRで割って株数を決めます。")
 
     if info["real_margin"] > 0:
-        lev = limit_after_buffer / info["real_margin"]
         st.caption(
-            f"実質保証金に対するレバレッジ **{lev:.2f}倍** ／ "
-            f"平常時の維持率 **{(info['real_margin'] / limit_after_buffer * 100) if limit_after_buffer > 0 else 0:.0f}%**"
+            f"実質保証金に対するレバレッジ **{info['leverage']:.2f}倍** ／ "
+            f"平常時の維持率 **{info['current_ratio']:.0f}%**"
         )
 
     st.caption(
@@ -622,7 +624,7 @@ def render_capital_summary(info, limit_after_buffer, stress_drop, assumed_dd, ta
     # --- 建玉CSVがあれば、現在の建代金と上限を突き合わせて過不足を表示 ---
     if stats:
         cur = stats["total_daikin"]
-        diff = limit_after_buffer - cur
+        diff = info["limit"] - cur
         st.markdown("**現在の建玉との比較**")
         d1, d2, d3 = st.columns(3)
         d1.metric("現在の建代金", f"{cur:,.0f} 円",
@@ -661,16 +663,10 @@ uploaded_file = st.sidebar.file_uploader("CSVファイルをアップロード",
 
 ticker_df = None
 if uploaded_file is not None:
-    try:
-        ticker_df = pd.read_csv(uploaded_file, encoding='utf-8-sig')
-    except:
-        ticker_df = pd.read_csv(uploaded_file, encoding='shift-jis')
+    ticker_df = read_csv_fallback_encoding(uploaded_file)
     st.sidebar.success("CSVを読み込みました。")
 elif os.path.exists(CSV_FILE):
-    try:
-        ticker_df = pd.read_csv(CSV_FILE, encoding='utf-8-sig')
-    except:
-        ticker_df = pd.read_csv(CSV_FILE, encoding='shift-jis')
+    ticker_df = read_csv_fallback_encoding(CSV_FILE)
     st.sidebar.info(f"ローカルファイルを使用中: {os.path.basename(CSV_FILE)}")
 
 # ------------------------------------------------------------------------
@@ -748,8 +744,7 @@ limit_info = calc_trading_limit(
     margin_rate_input, holding_months_input,
     accrued_cost=(margin_stats["total_keihi"] if margin_stats else 0.0),
 )
-trading_limit = limit_info["limit"]   # 建代金上限（安全余裕は目標維持率で明示的に確保）
-capital_input = trading_limit         # ポジションサイズ計算のベース資金
+trading_limit = limit_info["limit"]   # 建代金上限（安全余裕は目標維持率で明示的に確保）。ポジションサイズ計算のベース資金
 
 # ------------------------------------------------------------------------
 # 表示モード（スマホ/PC）
@@ -777,17 +772,17 @@ run_clicked = st.sidebar.button(
 if run_disabled:
     st.sidebar.caption("銘柄CSVを読み込むと実行できます。")
 
-if run_clicked and ticker_df is not None:
+if run_clicked:
     with st.status("データ取得・計算中...", expanded=True) as status:
         st.write("株価データの取得とモメンタムスコアの計算を実行中...（銘柄数により1〜2分かかります）")
-        rank_df, market_ok = run_ranking_process(ticker_df, float(capital_input))
+        rank_df, market_ok = run_ranking_process(ticker_df, trading_limit)
         status.update(label="完了", state="complete", expanded=False)
     # 結果をsession_stateへ永続化。生成後に他のウィジェットを操作しても結果が消えないようにする。
     st.session_state["rank_result"] = {
         "df": rank_df,
         "market_ok": market_ok,
         "generated_at": datetime.now(),
-        "trading_limit": float(capital_input),
+        "trading_limit": trading_limit,
     }
     st.toast("ランキングを生成しました")
 
@@ -806,8 +801,8 @@ if not has_result:
             "② 資金を入力\n\n"
             "③ ランキングを生成"
         )
-    # 結果生成前は従来どおりメイン画面に資金サマリーを表示する（結果生成後はタブ内のみに表示）
-    render_capital_summary(limit_info, trading_limit, stress_drop_input,
+    # 結果生成前はメイン画面に資金サマリーを表示する（生成後は資金サマリータブ内に表示）
+    render_capital_summary(limit_info, stress_drop_input,
                            assumed_dd_input, target_ratio_input,
                            margin_rate_input, holding_months_input,
                            stats=margin_stats)
@@ -843,7 +838,7 @@ with st.expander("💼 現在のポートフォリオ（保有銘柄・株数）
                     st.info(parse_note)
                 st.session_state["portfolio_data"] = extracted_csv[["Ticker", "Shares"]].reset_index(drop=True)
                 st.session_state["portfolio_editor_nonce"] = st.session_state.get("portfolio_editor_nonce", 0) + 1
-                _rerun_app()
+                st.rerun()
 
     # --- ② コピー&ペースト（Excelや証券会社サイトの保有銘柄一覧をそのまま貼り付け） ---
     st.markdown("**📋 Excel／証券会社サイトの保有銘柄一覧をそのまま貼り付け**")
@@ -861,7 +856,7 @@ with st.expander("💼 現在のポートフォリオ（保有銘柄・株数）
         else:
             st.session_state["portfolio_data"] = extracted_paste[["Ticker", "Shares"]].reset_index(drop=True)
             st.session_state["portfolio_editor_nonce"] = st.session_state.get("portfolio_editor_nonce", 0) + 1
-            _rerun_app()
+            st.rerun()
 
     # --- ③ 直接編集できる表（①②を使わない場合はここに手入力） ---
     # portfolio_data をこのアプリ唯一の「保有データの正本」として扱い、再実行をまたいで保持する。
@@ -898,7 +893,7 @@ with st.expander("💼 現在のポートフォリオ（保有銘柄・株数）
 # 結果表示（session_stateにあれば常に描画する。他ウィジェット操作で結果が消えない）
 # ------------------------------------------------------------------------
 if rank_result is not None:
-    if abs(rank_result["trading_limit"] - float(capital_input)) > 1e-6:
+    if abs(rank_result["trading_limit"] - trading_limit) > 1e-6:
         st.warning("資金設定が変更されています。最新の設定で再生成してください。")
     st.caption(f"生成日時: {rank_result['generated_at'].strftime('%Y-%m-%d %H:%M:%S')}")
 
@@ -950,7 +945,7 @@ if rank_result is not None:
                     format_func=lambda x: f"{x}件" if isinstance(x, int) else x,
                 )
 
-            # Action文字列を「★BUY/HOLD/SELL系/その他」の4分類にまとめる（表示フィルタ専用の分類、判定ロジックには影響しない）
+            # Action文字列を表示フィルタ用の4分類にまとめる
             def _action_group(a):
                 if a == "★BUY":
                     return "★BUY"
@@ -962,7 +957,7 @@ if rank_result is not None:
 
             display_cols = [
                 "Rank", "Ticker", "Name", "Action", "Shares_Rounded", "Score",
-                 "Price","MaxGap%", "AvgTurnover_Oku",  "Shares", "Position_Size"
+                "Price", "MaxGap%", "AvgTurnover_Oku", "Shares", "Position_Size"
             ]
             output_df = rank_df[display_cols]
 
@@ -979,7 +974,7 @@ if rank_result is not None:
             if show_n_option != "全件":
                 filtered_df = filtered_df.head(int(show_n_option))
 
-            # Action列に応じて行に薄い背景色を付ける（★BUY=緑系、SELL系=赤系、WAIT/SKIP=黄系。rgbaでダークモード対応）
+            # Action列に応じて行に薄い背景色を付ける（rgbaでライト/ダーク両対応）
             def _row_bg(row):
                 a = row["Action"]
                 if a == "★BUY":
@@ -1078,15 +1073,6 @@ if rank_result is not None:
                     c3.metric("🔵 買い増し", f"{n_add} 銘柄")
                     c4.metric("🟡 調整売却", f"{n_trim} 銘柄")
 
-                # --- 金額サマリー（表示用の集計のみ。TradeAmountの正/負の合計で、売買判断そのものは変えない） ---
-                buy_total = actionable_df.loc[actionable_df["TradeAmount"] > 0, "TradeAmount"].sum()
-                sell_total = -actionable_df.loc[actionable_df["TradeAmount"] < 0, "TradeAmount"].sum()
-                net_total = buy_total - sell_total
-                a1, a2, a3 = st.columns(3)
-                a1.metric("購入合計", f"{buy_total:,.0f} 円")
-                a2.metric("売却合計", f"{sell_total:,.0f} 円")
-                a3.metric("差引", f"{net_total:,.0f} 円")
-
                 if actionable_df.empty:
                     st.success("現在のポートフォリオに対して、新たに取るべきアクションはありません（全銘柄が保有継続）。")
                 else:
@@ -1129,7 +1115,7 @@ if rank_result is not None:
         # タブ3: 資金サマリー
         # ====================================================================
         with tab_capital:
-            render_capital_summary(limit_info, trading_limit, stress_drop_input,
+            render_capital_summary(limit_info, stress_drop_input,
                                    assumed_dd_input, target_ratio_input,
                                    margin_rate_input, holding_months_input,
                                    stats=margin_stats)
