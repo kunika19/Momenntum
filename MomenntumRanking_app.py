@@ -108,7 +108,7 @@ def run_ranking_process(ticker_df, trading_limit):
     tickers = ticker_df['Ticker'].tolist()
     name_map = dict(zip(ticker_df['Ticker'], ticker_df['Name']))
 
-    raw_data = yf.download(tickers + ["^N225"], period="1y", progress=False)
+    raw_data = yf.download(tickers + ["1306.T"], period="1y", progress=False)
     market_data = raw_data['Close']
     volume_data = raw_data['Volume']
     high_data = raw_data['High']
@@ -117,9 +117,9 @@ def run_ranking_process(ticker_df, trading_limit):
     virtual_capital = trading_limit
     risk_budget_per_stock = virtual_capital * RISK_FACTOR
     
-    n225_series = market_data["^N225"].dropna()
-    n225_ma200 = n225_series.rolling(200).mean().iloc[-1]
-    market_ok = n225_series.iloc[-1] > n225_ma200
+    topix_series = market_data["1306.T"].dropna()
+    topix_ma200 = topix_series.rolling(200).mean().iloc[-1]
+    market_ok = topix_series.iloc[-1] > topix_ma200
 
     results = []
     for ticker in tickers:
